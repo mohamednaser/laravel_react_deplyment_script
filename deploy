@@ -1,0 +1,165 @@
+#!/bin/bash
+
+if [ "$1" == "--help" ]; then
+    echo "any parmater within [] is required parmater and script will not run without it ."
+    echo "[-env] deployment environment -> -env (production | staging)"
+    echo "[-user] bitbucket username -> -user https://[user]@bitbucket.org..."
+    echo "[-mysql_user] mysql server user to use in login"
+    echo "[-mysql_pwd] npassword for mysql user script will use for login"
+    echo "-bitbucket_username username to use in bitbucket default => m_nasermitchdesigns"
+    exit 1
+fi
+
+### Deployment Configurations ###
+env="false"
+user="false" #bitbucket username  m_nasermitchdesigns
+mysql_user="false" #mysql server user
+mysql_pwd="false" #mysql server password
+backend_dir="/var/www/html/#choose_folder_name"
+frontend_dir="/var/www/html/#choose_folder_name"
+
+SCRIPTPATH="$( cd "$(dirname "$0")" ; pwd -P )"
+
+currentServerIP=$(ip -f inet -o addr show eth0|cut -d\  -f 7 | cut -d/ -f 1)
+backendAPISBaseUrl="\/backendAPIs"
+
+for val in $@
+do
+    if [ "$env" == "true" ]; then
+        env=$val
+    fi
+    if [ "$mysql_user" == "true" ]; then
+        mysql_user=$val
+    fi
+    if [ "$mysql_pwd" == "true" ]; then
+        mysql_pwd=$val
+    fi
+    if [ "$user" == "true" ]; then
+        user=$val
+    fi
+
+    # check what is the next parmater for 
+    if [ "$val" == "-env" ]; then
+        env="true"
+    fi
+    if [ "$val" == "-user" ]; then
+        user="true"
+    fi
+    if [ "$val" == "-mysql_user" ]; then
+        mysql_user="true"
+    fi
+    if [ "$val" == "-mysql_pwd" ]; then
+        mysql_pwd="true"
+    fi
+done
+
+errors=""
+if [ "$env" == "false" ]; then
+    errors+="[-env] argument is required type --help for more info .\n"
+fi
+if [ "$mysql_user" == "false" ]; then
+    errors+="[-mysql_user] argument is required --help for more info.\n"
+fi
+if [ "$mysql_pwd" == "false" ]; then
+    errors+="[-mysql_pwd] argument is required --help for more info.\n"
+fi
+if [ "$user" == "false" ]; then
+    errors+="[-user] argument is required --help for more info.\n"
+fi
+if [ "$env" != "production" ] && [ "$env" != "staging" ]; then
+    errors+="[-env] unknow enviroment selected --help for more info.\n"
+fi
+if [ "$errors" != "" ]; then
+    echo -e $errors
+    exit 1
+fi
+
+
+echo "--- deploying for $env"
+echo "    with user $user---"
+
+#### Dependencies Installation ####
+echo "--- installing dependencies (1) ---"
+apt update
+apt install nginx nodejs mysql-server composer npm php-mbstring php-xml php-gd php-gmp php-zip php-mysql
+npm install -g create-react-app
+
+#### Start React Deployment ####
+echo "--- fetching tazhub-react with username $user (2) ---"
+cd /var/www/html/ && git clone #insert_frontend_repo_url
+
+
+echo "--- configuring react project(3) ---"
+if [ "$env" == "production" ]; then
+    cp $SCRIPTPATH"/conf/frontend"/.env.production $frontend_dir/.env
+fi
+if [ "$env" == "staging" ]; then
+    cp $SCRIPTPATH"/conf/frontend"/.env.staging $frontend_dir/.env
+fi
+
+sed -i -r "s/(REACT_APP_BACKEND_API_BASE_URL*=*).*/\1$backendAPISBaseUrl/" $frontend_dir/.env
+
+echo "--- installing react packages (4)---"
+cd $frontend_dir && npm install
+
+
+echo "--- building react project , this may take a while (5)---"
+cd $frontend_dir && npm run build
+
+echo "--- building react project done ---"
+
+#### Start Backend Deployment ####
+echo "--- fetching backend Project with username $user (6)---"
+cd /var/www/html/ && git clone #insert_backend_repo_url
+
+
+echo "--- configuring tazhub-backend (7)---"
+if [ "$env" == "production" ]; then
+    cp $SCRIPTPATH"/conf/backend"/.env.production $backend_dir/.env
+fi
+if [ "$env" == "staging" ]; then
+    cp $SCRIPTPATH"/conf/backend"/.env.staging $backend_dir/.env
+fi
+
+echo "--- installing tazhub-backend packages (8)---"
+cd $backend_dir && composer install
+
+
+sudo chmod -R 0755 /www/html/#backend_folder_name_you_choose_first
+sudo chmod -R 7777 /www/html/#frontend_folder_name_you_choose_first
+
+echo "--- configuring mysql user---"
+mysql -u$mysql_user -p$mysql_pwd -e "GRANT ALL PRIVILEGES ON *.* TO '$mysql_user'@'localhost' IDENTIFIED BY '$mysql_pwd';"
+echo "--- creating project database---"
+mysql -u$mysql_user -p$mysql_pwd -e "CREATE DATABASE #insert_database_name CHARACTER SET utf8 COLLATE utf8_general_ci;"
+echo "--- configuring environment database credentials---"
+sed -i -r "s/(DB_DATABASE*=*).*/\1tazhub/" $backend_dir/.env
+sed -i -r "s/(DB_USERNAME*=*).*/\1$mysql_user/" $backend_dir/.env
+sed -i -r "s/(DB_PASSWORD*=*).*/\1$mysql_pwd/" $backend_dir/.env
+
+echo "--- generating environment key---"
+php $backend_dir/artisan key:generate
+echo "--- Run migration Commands---"
+php $backend_dir/artisan migrate
+echo "--- seeding tables---"
+php $backend_dir/artisan db:seed
+
+echo "--- add laravel crontab to linux ---"
+#write out current crontab
+crontab -l > tempcrontab
+echo "* * * * * php $backend_dir/artisan  schedule:run >> /dev/null 2>&1" >> tempcrontab
+crontab tempcrontab
+rm tempcrontab
+
+
+echo "--- Run Any Additionals commands ---"
+
+
+
+#### Nginx Server Configuration ####
+echo "--- configuring nginx server---"
+cp $SCRIPTPATH/conf/nginx.default.conf /etc/nginx/sites-available/default
+echo "--- restarting nginx---"
+service nginx restart
+
+echo "### DONE ###"
